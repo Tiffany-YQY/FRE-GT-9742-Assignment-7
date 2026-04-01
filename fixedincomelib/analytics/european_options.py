@@ -97,8 +97,36 @@ class EuropeanOptionAnalytics:
         res: Dict[SimpleMetrics, float] = {}
 
         # pricing
+        sqrt_t = math.sqrt(time_to_expiry)
+        vol_sqrt_t = log_normal_sigma * sqrt_t
+        d1 = (math.log(forward / strike) + 0.5 * log_normal_sigma**2 * time_to_expiry) / vol_sqrt_t
+        d2 = d1 - vol_sqrt_t
+        if option_type == CallOrPut.CALL:
+            res[SimpleMetrics.PV] = forward * norm.cdf(d1) - strike * norm.cdf(d2)
+        else:
+            res[SimpleMetrics.PV] = strike * norm.cdf(-d2) - forward * norm.cdf(-d1)
 
         # risk
+        if calc_risk:
+            pdf_d1 = norm.pdf(d1)
+            if option_type == CallOrPut.CALL:
+                delta = norm.cdf(d1)
+                strike_risk = -norm.cdf(d2)
+            else:
+                delta = norm.cdf(d1) - 1.0
+                strike_risk = norm.cdf(-d2)
+
+            gamma = pdf_d1 / (forward * vol_sqrt_t)
+            vega = forward * pdf_d1 * sqrt_t
+            tte_risk = forward * pdf_d1 * log_normal_sigma / (2.0 * sqrt_t)
+            theta = -tte_risk
+
+            res[SimpleMetrics.DELTA] = delta
+            res[SimpleMetrics.GAMMA] = gamma
+            res[SimpleMetrics.VEGA] = vega
+            res[SimpleMetrics.THETA] = theta
+            res[SimpleMetrics.TTE_RISK] = tte_risk
+            res[SimpleMetrics.STRIKE_RISK] = strike_risk
 
         return res
 
@@ -133,8 +161,35 @@ class EuropeanOptionAnalytics:
         res: Dict[SimpleMetrics, float] = {}
 
         # pricing
+        sqrt_t = math.sqrt(time_to_expiry)
+        sigma_sqrt_t = normal_sigma * sqrt_t
+        d = (forward - strike) / sigma_sqrt_t
+        if option_type == CallOrPut.CALL:
+            res[SimpleMetrics.PV] = (forward - strike) * norm.cdf(d) + sigma_sqrt_t * norm.pdf(d)
+        else:
+            res[SimpleMetrics.PV] = (strike - forward) * norm.cdf(-d) + sigma_sqrt_t * norm.pdf(d)
 
         # risk
+        if calc_risk:
+            pdf_d = norm.pdf(d)
+            if option_type == CallOrPut.CALL:
+                delta = norm.cdf(d)
+                strike_risk = -norm.cdf(d)
+            else:
+                delta = norm.cdf(d) - 1.0
+                strike_risk = norm.cdf(-d)
+
+            gamma = pdf_d / sigma_sqrt_t
+            vega = sqrt_t * pdf_d
+            tte_risk = normal_sigma * pdf_d / (2.0 * sqrt_t)
+            theta = -tte_risk
+
+            res[SimpleMetrics.DELTA] = delta
+            res[SimpleMetrics.GAMMA] = gamma
+            res[SimpleMetrics.VEGA] = vega
+            res[SimpleMetrics.THETA] = theta
+            res[SimpleMetrics.TTE_RISK] = tte_risk
+            res[SimpleMetrics.STRIKE_RISK] = strike_risk
 
         return res
 
@@ -163,13 +218,39 @@ class EuropeanOptionAnalytics:
         res: Dict[SimpleMetrics, float] = {}
 
         # 1) compute implied vol
+        sigma_imp = EuropeanOptionAnalytics._implied_lognormal_vol_black(
+            pv=pv,
+            forward=forward,
+            strike=strike,
+            time_to_expiry=time_to_expiry,
+            option_type=option_type,
+            tol=tol,
+        )
+        res[SimpleMetrics.IMPLIED_LOG_NORMAL_VOL] = sigma_imp
 
         # 2) compute greeks at implied vol
+        if calc_risk:
+            greeks = EuropeanOptionAnalytics.european_option_log_normal(
+                forward=forward,
+                strike=strike,
+                time_to_expiry=time_to_expiry,
+                log_normal_sigma=sigma_imp,
+                option_type=option_type,
+                calc_risk=True,
+            )
 
-        # 3) compute sensitivities of implied vol using implicit function theorem
-        # G(\sigma_imp(f, k, tte, pv), f, k, tte) = pv, where G is the pricing function
-        # For instance, for f risk, we have
-        # dG/dsigma * dsigma / df = - dG/df => - dG/df / dG/dsigma
+            # 3) compute sensitivities of implied vol using implicit function theorem
+            # G(\sigma_imp(f, k, tte, pv), f, k, tte) = pv, where G is the pricing function
+            # For instance, for f risk, we have
+            # dG/dsigma * dsigma / df = - dG/df => - dG/df / dG/dsigma
+            vega = greeks[SimpleMetrics.VEGA]
+            delta = greeks[SimpleMetrics.DELTA]
+            tte_risk = greeks[SimpleMetrics.TTE_RISK]
+            strike_risk = greeks[SimpleMetrics.STRIKE_RISK]
+
+            res[SimpleMetrics.D_LN_VOL_D_FORWARD] = -delta / vega
+            res[SimpleMetrics.D_LN_VOL_D_TTE] = -tte_risk / vega
+            res[SimpleMetrics.D_LN_VOL_D_STRIKE] = -strike_risk / vega
 
         return res
 
@@ -199,13 +280,39 @@ class EuropeanOptionAnalytics:
         res = {}
 
         # 1) Compute implied normal vol
+        sigma_imp = EuropeanOptionAnalytics._implied_normal_vol_bachelier(
+            pv=pv,
+            forward=forward,
+            strike=strike,
+            time_to_expiry=time_to_expiry,
+            option_type=option_type,
+            tol=tol,
+        )
+        res[SimpleMetrics.IMPLIED_NORMAL_VOL] = sigma_imp
 
         # 2) Compute Greeks at implied vol
+        if calc_risk:
+            greeks = EuropeanOptionAnalytics.european_option_normal(
+                forward=forward,
+                strike=strike,
+                time_to_expiry=time_to_expiry,
+                normal_sigma=sigma_imp,
+                option_type=option_type,
+                calc_risk=True,
+            )
 
-        # 3) Compute sensitivities of implied vol
-        # G(\sigma_imp(f, k, tte), f, k, tte) = pv, where G is the pricing function
-        # For instance, for f risk, we have
-        # dG/dsigma * dsigma / df = - dG/df => - dG/df / dG/dsigma
+            # 3) Compute sensitivities of implied vol
+            # G(\sigma_imp(f, k, tte), f, k, tte) = pv, where G is the pricing function
+            # For instance, for f risk, we have
+            # dG/dsigma * dsigma / df = - dG/df => - dG/df / dG/dsigma
+            vega = greeks[SimpleMetrics.VEGA]
+            delta = greeks[SimpleMetrics.DELTA]
+            tte_risk = greeks[SimpleMetrics.TTE_RISK]
+            strike_risk = greeks[SimpleMetrics.STRIKE_RISK]
+
+            res[SimpleMetrics.D_N_VOL_D_FORWARD] = -delta / vega
+            res[SimpleMetrics.D_N_VOL_D_TTE] = -tte_risk / vega
+            res[SimpleMetrics.D_N_VOL_D_STRIKE] = -strike_risk / vega
 
         return res
 
@@ -237,10 +344,45 @@ class EuropeanOptionAnalytics:
 
         # 1) black price (BS'76)
         # V = BS(f, k, tte, log_normal_sigma)
+        black = EuropeanOptionAnalytics.european_option_log_normal(
+            forward=forward + shift,
+            strike=strike + shift,
+            time_to_expiry=time_to_expiry,
+            log_normal_sigma=log_normal_sigma,
+            option_type=option_type,
+            calc_risk=calc_risk,
+        )
+        pv = black[SimpleMetrics.PV]
 
         # 2) implied normal vol (Bachelier)
         # nv = Imp(f, k, tte, V)
         # notice dnv/dV = 1 / vega
+        normal_res = EuropeanOptionAnalytics.implied_normal_vol_sensitivities(
+            pv=pv,
+            forward=forward + shift,
+            strike=strike + shift,
+            time_to_expiry=time_to_expiry,
+            option_type=option_type,
+            calc_risk=calc_risk,
+            tol=tol,
+        )
+        sigma_n = normal_res[SimpleMetrics.IMPLIED_NORMAL_VOL]
+        res[SimpleMetrics.IMPLIED_NORMAL_VOL] = sigma_n
+
+        if calc_risk:
+            normal_greeks = EuropeanOptionAnalytics.european_option_normal(
+                forward=forward + shift,
+                strike=strike + shift,
+                time_to_expiry=time_to_expiry,
+                normal_sigma=sigma_n,
+                option_type=option_type,
+                calc_risk=True,
+            )
+            vega_n = normal_greeks[SimpleMetrics.VEGA]
+            res[SimpleMetrics.D_N_VOL_D_LN_VOL] = black[SimpleMetrics.VEGA] / vega_n
+            res[SimpleMetrics.D_N_VOL_D_FORWARD] = (black[SimpleMetrics.DELTA] - normal_greeks[SimpleMetrics.DELTA]) / vega_n
+            res[SimpleMetrics.D_N_VOL_D_STRIKE] = (black[SimpleMetrics.STRIKE_RISK] - normal_greeks[SimpleMetrics.STRIKE_RISK]) / vega_n
+            res[SimpleMetrics.D_N_VOL_D_TTE] = (black[SimpleMetrics.TTE_RISK] - normal_greeks[SimpleMetrics.TTE_RISK]) / vega_n
 
         return res
 
@@ -272,12 +414,53 @@ class EuropeanOptionAnalytics:
 
         # 1) bachelier
         # V = Bachelier(f, k, tte, normal_sigma)
+        normal_res = EuropeanOptionAnalytics.european_option_normal(
+            forward=forward + shift,
+            strike=strike + shift,
+            time_to_expiry=time_to_expiry,
+            normal_sigma=normal_sigma,
+            option_type=option_type,
+            calc_risk=calc_risk,
+        )
+        pv = normal_res[SimpleMetrics.PV]
 
         # 2) implied log normal vol (BS'76)
         # ln_nv = Imp(f, k, tte, V)
         # notice dln_nv/dV = 1 / vega
+        lognormal_res = EuropeanOptionAnalytics.implied_lognormal_vol_sensitivities(
+            pv=pv,
+            forward=forward + shift,
+            strike=strike + shift,
+            time_to_expiry=time_to_expiry,
+            option_type=option_type,
+            calc_risk=calc_risk,
+            tol=tol,
+        )
+        sigma_ln = lognormal_res[SimpleMetrics.IMPLIED_LOG_NORMAL_VOL]
+        res[SimpleMetrics.IMPLIED_LOG_NORMAL_VOL] = sigma_ln
 
-        # risk
+        if calc_risk:
+            lognormal_greeks = EuropeanOptionAnalytics.european_option_log_normal(
+                forward=forward + shift,
+                strike=strike + shift,
+                time_to_expiry=time_to_expiry,
+                log_normal_sigma=sigma_ln,
+                option_type=option_type,
+                calc_risk=True,
+            )
+
+            vega_ln = lognormal_greeks[SimpleMetrics.VEGA]
+
+            res[SimpleMetrics.D_LN_VOL_D_N_VOL] = normal_res[SimpleMetrics.VEGA] / vega_ln
+            res[SimpleMetrics.D_LN_VOL_D_FORWARD] = (
+                normal_res[SimpleMetrics.DELTA] - lognormal_greeks[SimpleMetrics.DELTA]
+            ) / vega_ln
+            res[SimpleMetrics.D_LN_VOL_D_STRIKE] = (
+                normal_res[SimpleMetrics.STRIKE_RISK] - lognormal_greeks[SimpleMetrics.STRIKE_RISK]
+            ) / vega_ln
+            res[SimpleMetrics.D_LN_VOL_D_TTE] = (
+                normal_res[SimpleMetrics.TTE_RISK] - lognormal_greeks[SimpleMetrics.TTE_RISK]
+            ) / vega_ln
 
         return res
 
@@ -302,6 +485,56 @@ class EuropeanOptionAnalytics:
 
         Return "sigma" implied lognormal volatility
         """
+        intrinsic = max(forward - strike, 0.0) if option_type == CallOrPut.CALL else max(strike - forward, 0.0)
+        upper_bound = forward if option_type == CallOrPut.CALL else strike
+
+        if pv < intrinsic - tol or pv > upper_bound + tol:
+            raise ValueError("Option price is outside arbitrage bounds for Black-76")
+
+        if abs(pv - intrinsic) < tol:
+            return vol_min
+
+        sigma = max(
+            EuropeanOptionAnalytics._initial_log_normal_implied_vol_guess(forward, time_to_expiry, pv),
+            max(vol_min, 1e-8),
+        )
+        sigma = min(sigma, vol_max)
+
+        low = vol_min
+        high = vol_max
+
+        for _ in range(max_iter):
+            price_res = EuropeanOptionAnalytics.european_option_log_normal(
+                forward=forward,
+                strike=strike,
+                time_to_expiry=time_to_expiry,
+                log_normal_sigma=sigma,
+                option_type=option_type,
+                calc_risk=True,
+            )
+            price = price_res[SimpleMetrics.PV]
+            vega = price_res[SimpleMetrics.VEGA]
+            diff = price - pv
+
+            if abs(diff) < tol:
+                return sigma
+
+            if diff > 0:
+                high = sigma
+            else:
+                low = sigma
+
+            if abs(vega) > 1e-14:
+                sigma_newton = sigma - diff / vega
+            else:
+                sigma_newton = 0.5 * (low + high)
+
+            if sigma_newton <= low or sigma_newton >= high:
+                sigma = 0.5 * (low + high)
+            else:
+                sigma = sigma_newton
+
+        raise RuntimeError("Black implied lognormal volatility did not converge")
 
     @staticmethod
     def _implied_normal_vol_bachelier(
@@ -322,6 +555,54 @@ class EuropeanOptionAnalytics:
 
         Return "sigma" implied lognormal volatility
         """
+        intrinsic = max(forward - strike, 0.0) if option_type == CallOrPut.CALL else max(strike - forward, 0.0)
+        if pv < intrinsic - tol:
+            raise ValueError("Option price is outside arbitrage bounds for Bachelier")
+
+        if abs(pv - intrinsic) < tol:
+            return vol_min
+
+        sigma = max(
+            EuropeanOptionAnalytics._initial_normal_implied_vol_guess(time_to_expiry, pv),
+            vol_min,
+        )
+        sigma = min(sigma, vol_max)
+
+        low = vol_min
+        high = vol_max
+
+        for _ in range(max_iter):
+            price_res = EuropeanOptionAnalytics.european_option_normal(
+                forward=forward,
+                strike=strike,
+                time_to_expiry=time_to_expiry,
+                normal_sigma=sigma,
+                option_type=option_type,
+                calc_risk=True,
+            )
+            price = price_res[SimpleMetrics.PV]
+            vega = price_res[SimpleMetrics.VEGA]
+            diff = price - pv
+
+            if abs(diff) < tol:
+                return sigma
+
+            if diff > 0:
+                high = sigma
+            else:
+                low = sigma
+
+            if abs(vega) > 1e-14:
+                sigma_newton = sigma - diff / vega
+            else:
+                sigma_newton = 0.5 * (low + high)
+
+            if sigma_newton <= low or sigma_newton >= high:
+                sigma = 0.5 * (low + high)
+            else:
+                sigma = sigma_newton
+
+        raise RuntimeError("Bachelier implied normal volatility did not converge")
 
     @staticmethod
     def _initial_log_normal_implied_vol_guess(forward: float, time_to_expiry: float, pv: float):
